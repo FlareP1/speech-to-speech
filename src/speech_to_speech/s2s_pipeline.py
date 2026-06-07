@@ -128,25 +128,30 @@ def rename_args(args: Any, prefix: str) -> None:
 
 
 def parse_arguments() -> ParsedArguments:
-    # Pre-parse to determine which LM backend is selected, so only one of the three
+    # Pre-parse to determine which LM backend is selected, so only one of the two
     # mutually exclusive LM argument classes is registered with HfArgumentParser
     # (avoids duplicate field names from the shared LanguageModelBaseArguments base).
     _is_json = len(sys.argv) == 2 and sys.argv[1].endswith(".json")
+    _use_responses_api: bool = True
+    _pre_llm_backend: str = "responses-api"
     if _is_json:
         with open(sys.argv[1]) as _f:
             _llm_backend = json.load(_f).get("llm_backend", "responses-api")
+            _use_responses_api = _llm_backend == "responses-api"
+            _pre_llm_backend = _llm_backend
     else:
         _pre = argparse.ArgumentParser(add_help=False)
         _pre.add_argument("--llm_backend", default="responses-api")
-        _llm_backend = _pre.parse_known_args()[0].llm_backend
+        _pre_llm_backend, _ = _pre.parse_known_args()
+        _use_responses_api = _pre_llm_backend.llm_backend == "responses-api"
 
-    if _llm_backend == "responses-api":
+    if _use_responses_api:
         _lm_class = ResponsesApiLanguageModelHandlerArguments
-    elif _llm_backend == "chat-completions":
+    elif _pre_llm_backend.llm_backend == "chat-completions":
         _lm_class = ChatCompletionsLanguageModelHandlerArguments
     else:
         _lm_class = LanguageModelHandlerArguments
-    logger.debug("LLM backend pre-parse: backend=%s, registering %s", _llm_backend, _lm_class.__name__)
+    logger.debug("LLM backend pre-parse: use_responses_api=%s, registering %s", _use_responses_api, _lm_class.__name__)
 
     parser = HfArgumentParser(
         (  # type: ignore[arg-type]
