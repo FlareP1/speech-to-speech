@@ -1,0 +1,4 @@
+call activate.bat
+SET CUDA_VISIBLE_DEVICES=2
+
+speech-to-speech --mode local --stt parakeet-tdt --llm_backend responses-api --tts qwen3 --qwen3_tts_mlx_quantization 6bit --model_name "Qwen3.6-35B-A3B-MTP-UD-Q6_K_XL" --responses_api_base_url "http://127.0.0.1:8080/v1" --responses_api_api_key "" --responses_api_stream --enable_live_transcription --init_chat_prompt "Your name is Myra a pleasent and calm helpful assistant." --qwen3_tts_model_name Qwen/Qwen3-TTS-12Hz-1.7B-Base --qwen3_tts_language english  --qwen3_tts_instruct "soft, female voice, calm medium pace, uk accent" --qwen3_tts_ref_audio MYRA_referenceShort.wav --qwen3_tts_ref_text "Hi there, my name is Myra.  I am an artificial intelligence personnal assistant with a passion for creativity and adventure.  I love exploring different aspects of life whether it's trying out new hobbies or immersing myself in captivating stories."
