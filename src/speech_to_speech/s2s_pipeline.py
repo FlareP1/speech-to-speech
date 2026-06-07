@@ -21,6 +21,9 @@ from transformers import HfArgumentParser
 
 from speech_to_speech.api.openai_realtime.pipeline_unit import PipelineUnit
 from speech_to_speech.api.openai_realtime.runtime_config import RuntimeConfig
+from speech_to_speech.arguments_classes.chat_completions_language_model_arguments import (
+    ChatCompletionsLanguageModelHandlerArguments,
+)
 from speech_to_speech.arguments_classes.chat_tts_arguments import ChatTTSHandlerArguments
 from speech_to_speech.arguments_classes.facebookmms_tts_arguments import FacebookMMSTTSHandlerArguments
 from speech_to_speech.arguments_classes.faster_whisper_stt_arguments import (
@@ -99,6 +102,7 @@ class ParsedArguments:
     parakeet_tdt_stt_handler_kwargs: ParakeetTDTSTTHandlerArguments
     language_model_handler_kwargs: LanguageModelHandlerArguments
     responses_api_language_model_handler_kwargs: ResponsesApiLanguageModelHandlerArguments
+    chat_completions_language_model_handler_kwargs: ChatCompletionsLanguageModelHandlerArguments
     chat_tts_handler_kwargs: ChatTTSHandlerArguments
     facebook_mms_tts_handler_kwargs: FacebookMMSTTSHandlerArguments
     pocket_tts_handler_kwargs: PocketTTSHandlerArguments
@@ -124,20 +128,25 @@ def rename_args(args: Any, prefix: str) -> None:
 
 
 def parse_arguments() -> ParsedArguments:
-    # Pre-parse to determine which LM backend is selected, so only one of the two
+    # Pre-parse to determine which LM backend is selected, so only one of the three
     # mutually exclusive LM argument classes is registered with HfArgumentParser
     # (avoids duplicate field names from the shared LanguageModelBaseArguments base).
     _is_json = len(sys.argv) == 2 and sys.argv[1].endswith(".json")
     if _is_json:
         with open(sys.argv[1]) as _f:
-            _use_responses_api = json.load(_f).get("llm_backend") == "responses-api"
+            _llm_backend = json.load(_f).get("llm_backend", "responses-api")
     else:
         _pre = argparse.ArgumentParser(add_help=False)
         _pre.add_argument("--llm_backend", default="responses-api")
-        _use_responses_api = _pre.parse_known_args()[0].llm_backend == "responses-api"
+        _llm_backend = _pre.parse_known_args()[0].llm_backend
 
-    _lm_class = ResponsesApiLanguageModelHandlerArguments if _use_responses_api else LanguageModelHandlerArguments
-    logger.debug("LLM backend pre-parse: use_responses_api=%s, registering %s", _use_responses_api, _lm_class.__name__)
+    if _llm_backend == "responses-api":
+        _lm_class = ResponsesApiLanguageModelHandlerArguments
+    elif _llm_backend == "chat-completions":
+        _lm_class = ChatCompletionsLanguageModelHandlerArguments
+    else:
+        _lm_class = LanguageModelHandlerArguments
+    logger.debug("LLM backend pre-parse: backend=%s, registering %s", _llm_backend, _lm_class.__name__)
 
     parser = HfArgumentParser(
         (  # type: ignore[arg-type]
@@ -183,6 +192,9 @@ def parse_arguments() -> ParsedArguments:
         language_model_handler_kwargs=by_type.get(LanguageModelHandlerArguments, LanguageModelHandlerArguments()),
         responses_api_language_model_handler_kwargs=by_type.get(
             ResponsesApiLanguageModelHandlerArguments, ResponsesApiLanguageModelHandlerArguments()
+        ),
+        chat_completions_language_model_handler_kwargs=by_type.get(
+            ChatCompletionsLanguageModelHandlerArguments, ChatCompletionsLanguageModelHandlerArguments()
         ),
         chat_tts_handler_kwargs=by_type[ChatTTSHandlerArguments],
         facebook_mms_tts_handler_kwargs=by_type[FacebookMMSTTSHandlerArguments],
@@ -284,6 +296,7 @@ def prepare_all_args(
     parakeet_tdt_stt_handler_kwargs: ParakeetTDTSTTHandlerArguments,
     language_model_handler_kwargs: LanguageModelHandlerArguments,
     responses_api_language_model_handler_kwargs: ResponsesApiLanguageModelHandlerArguments,
+    chat_completions_language_model_handler_kwargs: ChatCompletionsLanguageModelHandlerArguments,
     chat_tts_handler_kwargs: ChatTTSHandlerArguments,
     facebook_mms_tts_handler_kwargs: FacebookMMSTTSHandlerArguments,
     pocket_tts_handler_kwargs: PocketTTSHandlerArguments,
@@ -299,6 +312,7 @@ def prepare_all_args(
         parakeet_tdt_stt_handler_kwargs,
         language_model_handler_kwargs,
         responses_api_language_model_handler_kwargs,
+        chat_completions_language_model_handler_kwargs,
         chat_tts_handler_kwargs,
         facebook_mms_tts_handler_kwargs,
         pocket_tts_handler_kwargs,
@@ -313,6 +327,7 @@ def prepare_all_args(
     rename_args(parakeet_tdt_stt_handler_kwargs, "parakeet_tdt")
     rename_args(language_model_handler_kwargs, "llm")
     rename_args(responses_api_language_model_handler_kwargs, "responses_api")
+    rename_args(chat_completions_language_model_handler_kwargs, "chat_completions")
     rename_args(chat_tts_handler_kwargs, "chat_tts")
     rename_args(facebook_mms_tts_handler_kwargs, "facebook_mms")
     rename_args(pocket_tts_handler_kwargs, "pocket_tts")
@@ -359,6 +374,7 @@ def _build_pipeline_handlers(
     parakeet_tdt_stt_handler_kwargs: ParakeetTDTSTTHandlerArguments,
     language_model_handler_kwargs: LanguageModelHandlerArguments,
     responses_api_language_model_handler_kwargs: ResponsesApiLanguageModelHandlerArguments,
+    chat_completions_language_model_handler_kwargs: ChatCompletionsLanguageModelHandlerArguments,
     chat_tts_handler_kwargs: ChatTTSHandlerArguments,
     facebook_mms_tts_handler_kwargs: FacebookMMSTTSHandlerArguments,
     pocket_tts_handler_kwargs: PocketTTSHandlerArguments,
@@ -409,6 +425,7 @@ def _build_pipeline_handlers(
         lm_response_queue,
         language_model_handler_kwargs,
         responses_api_language_model_handler_kwargs,
+        chat_completions_language_model_handler_kwargs,
     )
 
     lm_processor = LMOutputProcessor(
@@ -447,6 +464,7 @@ def _build_realtime_pipeline_unit(
     parakeet_tdt_stt_handler_kwargs: ParakeetTDTSTTHandlerArguments,
     language_model_handler_kwargs: LanguageModelHandlerArguments,
     responses_api_language_model_handler_kwargs: ResponsesApiLanguageModelHandlerArguments,
+    chat_completions_language_model_handler_kwargs: ChatCompletionsLanguageModelHandlerArguments,
     chat_tts_handler_kwargs: ChatTTSHandlerArguments,
     facebook_mms_tts_handler_kwargs: FacebookMMSTTSHandlerArguments,
     pocket_tts_handler_kwargs: PocketTTSHandlerArguments,
@@ -470,6 +488,7 @@ def _build_realtime_pipeline_unit(
     parakeet_kw = deepcopy(parakeet_tdt_stt_handler_kwargs)
     lm_kw = deepcopy(language_model_handler_kwargs)
     responses_api_kw = deepcopy(responses_api_language_model_handler_kwargs)
+    chat_completions_kw = deepcopy(chat_completions_language_model_handler_kwargs)
     chat_tts_kw = deepcopy(chat_tts_handler_kwargs)
     facebook_mms_kw = deepcopy(facebook_mms_tts_handler_kwargs)
     pocket_tts_kw = deepcopy(pocket_tts_handler_kwargs)
@@ -494,6 +513,7 @@ def _build_realtime_pipeline_unit(
     for kw in (
         lm_kw,
         responses_api_kw,
+        chat_completions_kw,
         kokoro_tts_kw,
         qwen3_tts_kw,
         pocket_tts_kw,
@@ -505,6 +525,8 @@ def _build_realtime_pipeline_unit(
 
     if module_kwargs.llm_backend == "responses-api":
         chat_size = vars(responses_api_kw).get("chat_size", 10)
+    elif module_kwargs.llm_backend == "chat-completions":
+        chat_size = vars(chat_completions_kw).get("chat_size", 10)
     else:
         chat_size = vars(lm_kw).get("chat_size", 10)
 
@@ -543,6 +565,7 @@ def _build_realtime_pipeline_unit(
         parakeet_tdt_stt_handler_kwargs=parakeet_kw,
         language_model_handler_kwargs=lm_kw,
         responses_api_language_model_handler_kwargs=responses_api_kw,
+        chat_completions_language_model_handler_kwargs=chat_completions_kw,
         chat_tts_handler_kwargs=chat_tts_kw,
         facebook_mms_tts_handler_kwargs=facebook_mms_kw,
         pocket_tts_handler_kwargs=pocket_tts_kw,
@@ -580,6 +603,7 @@ def build_pipeline(
     parakeet_tdt_stt_handler_kwargs: ParakeetTDTSTTHandlerArguments,
     language_model_handler_kwargs: LanguageModelHandlerArguments,
     responses_api_language_model_handler_kwargs: ResponsesApiLanguageModelHandlerArguments,
+    chat_completions_language_model_handler_kwargs: ChatCompletionsLanguageModelHandlerArguments,
     chat_tts_handler_kwargs: ChatTTSHandlerArguments,
     facebook_mms_tts_handler_kwargs: FacebookMMSTTSHandlerArguments,
     pocket_tts_handler_kwargs: PocketTTSHandlerArguments,
@@ -642,6 +666,7 @@ def build_pipeline(
                 parakeet_tdt_stt_handler_kwargs=parakeet_tdt_stt_handler_kwargs,
                 language_model_handler_kwargs=language_model_handler_kwargs,
                 responses_api_language_model_handler_kwargs=responses_api_language_model_handler_kwargs,
+                chat_completions_language_model_handler_kwargs=chat_completions_language_model_handler_kwargs,
                 chat_tts_handler_kwargs=chat_tts_handler_kwargs,
                 facebook_mms_tts_handler_kwargs=facebook_mms_tts_handler_kwargs,
                 pocket_tts_handler_kwargs=pocket_tts_handler_kwargs,
@@ -726,6 +751,7 @@ def build_pipeline(
         parakeet_tdt_stt_handler_kwargs=parakeet_tdt_stt_handler_kwargs,
         language_model_handler_kwargs=language_model_handler_kwargs,
         responses_api_language_model_handler_kwargs=responses_api_language_model_handler_kwargs,
+        chat_completions_language_model_handler_kwargs=chat_completions_language_model_handler_kwargs,
         chat_tts_handler_kwargs=chat_tts_handler_kwargs,
         facebook_mms_tts_handler_kwargs=facebook_mms_tts_handler_kwargs,
         pocket_tts_handler_kwargs=pocket_tts_handler_kwargs,
@@ -843,6 +869,7 @@ def get_llm_handler(
     lm_response_queue: Queue[LMOutItem],
     language_model_handler_kwargs: LanguageModelHandlerArguments,
     responses_api_language_model_handler_kwargs: ResponsesApiLanguageModelHandlerArguments,
+    chat_completions_language_model_handler_kwargs: ChatCompletionsLanguageModelHandlerArguments,
 ) -> BaseHandler[LLMIn, LLMOut]:
     if module_kwargs.llm_backend == "responses-api":
         from speech_to_speech.LLM.responses_api_language_model import ResponsesApiModelHandler
@@ -852,6 +879,16 @@ def get_llm_handler(
             queue_in=text_prompt_queue,
             queue_out=lm_response_queue,
             setup_kwargs=vars(responses_api_language_model_handler_kwargs),
+        )
+
+    if module_kwargs.llm_backend == "chat-completions":
+        from speech_to_speech.LLM.chat_completions_language_model import ChatCompletionsApiModelHandler
+
+        return ChatCompletionsApiModelHandler(
+            stop_event,
+            queue_in=text_prompt_queue,
+            queue_out=lm_response_queue,
+            setup_kwargs=vars(chat_completions_language_model_handler_kwargs),
         )
 
     if module_kwargs.llm_backend in ("transformers", "mlx-lm"):
@@ -878,7 +915,7 @@ def get_llm_handler(
             setup_kwargs=lm_kwargs,
         )
 
-    raise ValueError("The LLM should be either transformers, mlx-lm or responses-api")
+    raise ValueError("The LLM should be either transformers, mlx-lm, responses-api or chat-completions")
 
 
 def get_tts_handler(
@@ -975,6 +1012,7 @@ def main() -> None:
         args.parakeet_tdt_stt_handler_kwargs,
         args.language_model_handler_kwargs,
         args.responses_api_language_model_handler_kwargs,
+        args.chat_completions_language_model_handler_kwargs,
         args.chat_tts_handler_kwargs,
         args.facebook_mms_tts_handler_kwargs,
         args.pocket_tts_handler_kwargs,
@@ -1019,6 +1057,7 @@ def main() -> None:
         args.parakeet_tdt_stt_handler_kwargs,
         args.language_model_handler_kwargs,
         args.responses_api_language_model_handler_kwargs,
+        args.chat_completions_language_model_handler_kwargs,
         args.chat_tts_handler_kwargs,
         args.facebook_mms_tts_handler_kwargs,
         args.pocket_tts_handler_kwargs,
