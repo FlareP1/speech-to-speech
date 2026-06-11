@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import json
 import logging
+import sys
 import time
 from collections.abc import Iterator
 from typing import Any, Optional
@@ -38,6 +39,7 @@ from speech_to_speech.pipeline.messages import (
 from speech_to_speech.utils.utils import _generate_id
 
 logger = logging.getLogger(__name__)
+logger.setLevel(logging.DEBUG)
 
 
 # ---------------------------------------------------------------------------
@@ -302,6 +304,7 @@ class ChatCompletionsApiModelHandler(BaseHandler[LLMIn, LLMOut]):
 
         for iteration in range(5):
             messages = _build_openai_messages(active_chat)
+            logger.debug("=== LLM iteration %d: sending %d messages ===", iteration, len(messages))
 
             try:
                 stream = self.client.chat.completions.create(
@@ -343,12 +346,19 @@ class ChatCompletionsApiModelHandler(BaseHandler[LLMIn, LLMOut]):
             tool_calls_collected: dict[int, dict] = {}
             text_parts: list[str] = []
             printable_text = ""
+            reasoning_text = ""
             sentence_batch: list[str] = []
             finish_reason: Optional[str] = None
             input_tokens = 0
             output_tokens = 0
+            event_count = 0
+            text_count = 0
 
             for event in stream:
+                event_count += 1
+                if event_count % 500 == 0:
+                    logger.debug("Stream event %d | text chars so far: %d", event_count, len("".join(text_parts)))
+
                 # Cancellation check
                 if self._generation_is_stale(gen):
                     logger.info("LLM generation cancelled (interruption)")
@@ -367,8 +377,17 @@ class ChatCompletionsApiModelHandler(BaseHandler[LLMIn, LLMOut]):
                     input_tokens = getattr(usage, "prompt_tokens", 0) or 0
                     output_tokens = getattr(usage, "completion_tokens", 0) or 0
 
-                # Text delta
+                # Reasoning content — accumulate and update on single line
+                reasoning_content = delta.model_extra.get("reasoning_content")
+                if reasoning_content:
+                    reasoning_text += reasoning_content
+                    sys.stderr.write(f"{reasoning_content}")
+                    sys.stderr.flush()
+                    continue
+
+                # Text delta — spoken content only
                 if delta.content:
+                    text_count += 1
                     new_text = remove_unspeechable(delta.content)
                     text_parts.append(new_text)
                     printable_text += new_text
@@ -380,6 +399,7 @@ class ChatCompletionsApiModelHandler(BaseHandler[LLMIn, LLMOut]):
                                 if self._generation_is_stale(gen):
                                     cancelled = True
                                     break
+                                logger.debug("STREAMING CHUNK: %s", " ".join(sentence_batch))
                                 yield LLMResponseChunk(
                                     text=" ".join(sentence_batch),
                                     language_code=language_code,
@@ -422,10 +442,41 @@ class ChatCompletionsApiModelHandler(BaseHandler[LLMIn, LLMOut]):
             except Exception:
                 pass
 
+            if reasoning_text.strip():
+                sys.stderr.write("\n")
+            logger.debug("Stream ended: %d events | %d text deltas | total text chars: %d | finish_reason: %s",
+                         event_count, text_count, len("".join(text_parts)), finish_reason)
+
             if cancelled:
                 break
 
             # --- handle finish_reason ---
+            if finish_reason == "length":
+                logger.warning(
+                    "LLM hit max_tokens (%d) on iteration %d; response may be truncated",
+                    self.max_tokens,
+                    iteration,
+                )
+                full_text = "".join(text_parts).strip()
+                if not full_text:
+                    full_text = "I'm sorry, I lost my train of thought. Could you repeat that?"
+                yield LLMResponseChunk(
+                    text=full_text,
+                    language_code=language_code,
+                    runtime_config=runtime_config,
+                    response=response,
+                    turn_id=turn_id,
+                    turn_revision=turn_revision,
+                    speech_stopped_at_s=speech_stopped_at_s,
+                    cancel_generation=gen,
+                )
+                yield EndOfResponse(
+                    turn_id=turn_id,
+                    turn_revision=turn_revision,
+                    cancel_generation=gen,
+                )
+                return
+
             if finish_reason == "tool_calls":
                 if not tool_calls_collected:
                     logger.warning("finish_reason=tool_calls but no tool calls collected")
@@ -505,6 +556,8 @@ class ChatCompletionsApiModelHandler(BaseHandler[LLMIn, LLMOut]):
                     )
 
             full_text = "".join(text_parts).strip()
+            if full_text:
+                logger.debug("=== LLM iteration %d final output: %s ===", iteration, full_text)
             break
 
         # --- post-generation bookkeeping ---
