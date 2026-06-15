@@ -21,11 +21,14 @@ from speech_to_speech.baseHandler import BaseHandler
 from speech_to_speech.LLM.chat import (
     Chat,
     RealtimeConversationItemAssistantMessage,
+    RealtimeConversationItemFunctionCall,
+    RealtimeConversationItemFunctionCallOutput,
     RealtimeConversationItemUserMessage,
     make_assistant_message,
     make_system_message,
     make_user_message,
 )
+from speech_to_speech.LLM.compaction_prompt import CompactGenerateFn, build_compactor
 from speech_to_speech.LLM.mcp_client import MCPClient
 from speech_to_speech.LLM.utils import remove_unspeechable, resolve_auto_language
 from speech_to_speech.LLM.voice_prompt import build_voice_system_prompt
@@ -36,6 +39,7 @@ from speech_to_speech.pipeline.messages import (
     LLMResponseChunk,
     TokenUsage,
 )
+from speech_to_speech.pipeline.speculative_turns import SpeculativeTurnTracker
 from speech_to_speech.utils.utils import _generate_id
 
 logger = logging.getLogger(__name__)
@@ -135,16 +139,22 @@ class ChatCompletionsApiModelHandler(BaseHandler[LLMIn, LLMOut]):
         mcp_servers: Optional[str] = None,
         mcp_enabled: bool = False,
         cancel_scope: Optional[CancelScope] = None,
+        speculative_turns: Optional[SpeculativeTurnTracker] = None,
         stream_batch_sentences: int = 3,
         enable_lang_prompt: bool = False,
         request_timeout_s: float = 120.0,
         max_tokens: int = 4096,
+        disable_thinking: bool = True,
+        compact_history: bool = False,
+        gen_kwargs: dict[str, Any] = {},
         **_kwargs: Any,
     ) -> None:
         self.cancel_scope = cancel_scope
+        self.speculative_turns = speculative_turns
         self.stream_batch_sentences = max(1, stream_batch_sentences)
         self.enable_lang_prompt = enable_lang_prompt
         self.max_tokens = max(1, max_tokens)
+        self.gen_kwargs = dict(gen_kwargs)
         self.mcp_client: Optional[MCPClient] = None
         self.tools: list[dict] = []
 
@@ -162,6 +172,15 @@ class ChatCompletionsApiModelHandler(BaseHandler[LLMIn, LLMOut]):
 
         # Resolve model name: try auto-detect via GET /v1/models, fallback to param
         self.model_name = self._resolve_model(api_model)
+
+        # Thinking suppression — mirrors ResponsesApiModelHandler
+        self._extra_body = (
+            {"chat_template_kwargs": {"enable_thinking": False}}
+            if disable_thinking
+            and base_url is not None
+            and base_url != "https://api.openai.com/v1"
+            else None
+        )
 
         # MCP tools
         if mcp_enabled and mcp_server_url:
@@ -181,6 +200,9 @@ class ChatCompletionsApiModelHandler(BaseHandler[LLMIn, LLMOut]):
                 logger.warning("mcp_enabled=True but no servers specified; tools disabled")
         elif mcp_enabled:
             logger.warning("mcp_enabled=True but mcp_server_url not set; tools disabled")
+
+        # Compaction
+        self.compactor = build_compactor(self._build_compaction_generate_fn()) if compact_history else None
 
         self.warmup()
 
@@ -202,8 +224,36 @@ class ChatCompletionsApiModelHandler(BaseHandler[LLMIn, LLMOut]):
 
     # ---- cancellation helpers (mirrors ResponsesApiModelHandler) ------------
 
+    def _turn_is_latest(self, turn_id: str | None, turn_revision: int | None) -> bool:
+        return self.speculative_turns is None or self.speculative_turns.is_latest(turn_id, turn_revision)
+
+    def _turn_output_allowed(self, turn_id: str | None, turn_revision: int | None) -> bool:
+        if self.speculative_turns is None:
+            return True
+        return self.speculative_turns.is_latest_after_reopen_grace(turn_id, turn_revision)
+
     def _generation_is_stale(self, gen: int | None) -> bool:
         return gen is not None and self.cancel_scope is not None and self.cancel_scope.is_stale(gen)
+
+    def _build_compaction_generate_fn(self) -> CompactGenerateFn:
+        """Return a generate fn that calls Chat Completions for compaction."""
+        client = self.client
+        model_name = self.model_name
+        timeout = self.request_timeout
+
+        def generate(system: str, user: str) -> str:
+            response = client.chat.completions.create(
+                model=model_name,
+                messages=[
+                    {"role": "system", "content": system},
+                    {"role": "user", "content": user},
+                ],
+                max_tokens=1024,
+                timeout=timeout,
+            )
+            return response.choices[0].message.content or ""
+
+        return generate
 
     # ---- lifecycle ---------------------------------------------------------
 
@@ -219,6 +269,7 @@ class ChatCompletionsApiModelHandler(BaseHandler[LLMIn, LLMOut]):
                 ],
                 max_tokens=1,
                 timeout=self.request_timeout,
+                extra_body=self._extra_body,
             )
         except Exception:
             logger.debug("Warmup call failed (non-fatal)")
@@ -244,6 +295,10 @@ class ChatCompletionsApiModelHandler(BaseHandler[LLMIn, LLMOut]):
         turn_id = request.turn_id
         turn_revision = request.turn_revision
         speech_stopped_at_s = request.speech_stopped_at_s
+        if not self._turn_is_latest(turn_id, turn_revision):
+            logger.info("Skipping stale LLM request for turn=%s rev=%s", turn_id, turn_revision)
+            yield EndOfResponse(turn_id=turn_id, turn_revision=turn_revision)
+            return
 
         original_chat = runtime_config.chat
         active_chat = original_chat.copy()
@@ -312,16 +367,17 @@ class ChatCompletionsApiModelHandler(BaseHandler[LLMIn, LLMOut]):
                     messages=messages,
                     tools=req_tools if req_tools else None,
                     stream=True,
-                    temperature=0.1,
                     max_tokens=self.max_tokens,
                     timeout=self.request_timeout,
+                    extra_body=self._extra_body,
+                    **self.gen_kwargs,
                 )
             except httpx.ReadTimeout:
                 logger.warning(
                     "Chat Completions API read timed out after %.1fs",
                     self.request_timeout_s,
                 )
-                if not self._generation_is_stale(gen):
+                if not self._generation_is_stale(gen) and self._turn_output_allowed(turn_id, turn_revision):
                     yield LLMResponseChunk(
                         text="Wow I'm a bit slow today, could you repeat that?",
                         runtime_config=runtime_config,
@@ -397,6 +453,10 @@ class ChatCompletionsApiModelHandler(BaseHandler[LLMIn, LLMOut]):
                             sentence_batch.append(s)
                             if len(sentence_batch) >= self.stream_batch_sentences:
                                 if self._generation_is_stale(gen):
+                                    cancelled = True
+                                    break
+                                if not self._turn_output_allowed(turn_id, turn_revision):
+                                    logger.info("LLM generation cancelled (stale speculative turn)")
                                     cancelled = True
                                     break
                                 logger.debug("STREAMING CHUNK: %s", " ".join(sentence_batch))
@@ -565,6 +625,7 @@ class ChatCompletionsApiModelHandler(BaseHandler[LLMIn, LLMOut]):
             original_chat.add_item(make_assistant_message(full_text))
 
         original_chat.strip_images()
+        original_chat.trim_if_needed(self.compactor)
 
         if input_tokens or output_tokens:
             yield TokenUsage(
