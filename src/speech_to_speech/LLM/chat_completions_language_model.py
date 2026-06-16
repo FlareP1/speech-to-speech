@@ -623,6 +623,21 @@ class ChatCompletionsApiModelHandler(BaseHandler[LLMIn, LLMOut]):
         # --- post-generation bookkeeping ---
         if not cancelled and full_text:
             original_chat.add_item(make_assistant_message(full_text))
+        elif not cancelled and iteration >= 4:
+            # Tool loop exhausted without producing text — give the user something
+            logger.warning("Tool loop exhausted without text response; yielding fallback")
+            full_text = "I wasn't able to find the information you were looking for. Could you try rephrasing your question?"
+            yield LLMResponseChunk(
+                text=full_text,
+                language_code=language_code,
+                runtime_config=runtime_config,
+                response=response,
+                turn_id=turn_id,
+                turn_revision=turn_revision,
+                speech_stopped_at_s=speech_stopped_at_s,
+                cancel_generation=gen,
+            )
+            original_chat.add_item(make_assistant_message(full_text))
 
         original_chat.strip_images()
         original_chat.trim_if_needed(self.compactor)

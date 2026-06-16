@@ -721,6 +721,8 @@ def build_pipeline(
 
     if module_kwargs.llm_backend == "responses-api":
         _lm_vars = vars(responses_api_language_model_handler_kwargs)
+    elif module_kwargs.llm_backend == "chat-completions":
+        _lm_vars = vars(chat_completions_language_model_handler_kwargs)
     else:
         _lm_vars = vars(language_model_handler_kwargs)
     transcription_notifier_setup: dict[str, Any] = {
