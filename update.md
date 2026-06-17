@@ -116,9 +116,31 @@ speech-to-speech --mode local \
   --qwen3_tts_ref_text "Hi there"
 ```
 
+## Bug Fixes & Improvements
+
+### Compaction Dict Handling
+The chat-completions backend stores plain `dict` objects (assistant messages with tool_calls, tool result messages) in the chat buffer alongside `RealtimeConversationItem*` objects. Fixed 3 places that accessed `.id` without checking for dicts:
+- `_snapshot_for_compaction`: skip dicts when collecting `marker_ids`
+- `_to_responses_api_chat_locked`: pass dicts through unchanged before `.id` assertion
+- `_apply_compaction`: skip dicts when computing `drop_ids` and `remaining`
+
+### Compaction Thinking Suppression
+The compaction LLM call didn't pass `extra_body` (enable_thinking=False), causing the model to output `<thinking>` blocks or empty content, which caused `_extract_json` to fail. Fixed by passing `extra_body` to the compaction generate function.
+
+### Max Context Detection for llama.cpp
+llama.cpp models don't expose `max_context_length` or `context_length` fields. Added `_get_max_context()` that checks both standard OpenAI fields and `model_extra['meta']['n_ctx']`.
+
+### Accurate Token Counting
+Replaced 4-char-per-token heuristic with `tiktoken`-based counting that uses the correct encoding per model name (with cl100k_base fallback). Counts tool definitions and tool call metadata.
+
+### Tests
+Added 11 new tests: 8 for chat-completions backend (tool loop, fallback, compaction, message building) and 3 for dict handling in compaction/serialization.
+
 ## Commits
 
 ```
+2b17548 Add tiktoken as runtime dependency
+9152148 Fix compaction crashes and add accurate token counting
 79fe50a Fix init_chat_prompt for chat-completions backend, add tool loop fallback, pin CUDA torch
 4f90236 Align chat completions backend with responses API
 d7f84c1 Add reasoning content logging and debug output to chat completions backend
