@@ -307,6 +307,9 @@ class Chat:
                 )
             )
         for item in buffer_items:
+            if isinstance(item, dict):
+                result.append(item)
+                continue
             assert item.id is not None and item.id != "", f"item.id is {item.id}"
             if isinstance(item, RealtimeConversationItemUserMessage):
                 content: ResponseInputMessageContentListParam = []
@@ -495,7 +498,7 @@ class Chat:
                     break
 
         items_to_compact = self.buffer[:end_idx]
-        marker_ids = {entry.id for entry in items_to_compact if entry.id is not None}
+        marker_ids = {entry.id for entry in items_to_compact if not isinstance(entry, dict) and entry.id is not None}
         snapshot = self._to_responses_api_chat_locked(items=items_to_compact)
         # Strip image parts so the summarizer doesn't have to handle them.
         for raw in snapshot:
@@ -588,12 +591,12 @@ class Chat:
             fc_ids_to_keep = {
                 x.id
                 for x in self.buffer
-                if x.id in marker_ids
+                if not isinstance(x, dict) and x.id in marker_ids
                 and isinstance(x, RealtimeConversationItemFunctionCall)
                 and x.call_id not in fco_call_ids_in_range
             }
             drop_ids = marker_ids - fc_ids_to_keep
-            remaining = [x for x in self.buffer if x.id not in drop_ids]
+            remaining = [x for x in self.buffer if not isinstance(x, dict) and x.id not in drop_ids]
 
             user_msg = make_user_message(result.user_summary)
             user_msg.id = _generate_id("msg")

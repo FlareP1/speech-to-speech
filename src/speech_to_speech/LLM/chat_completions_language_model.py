@@ -14,6 +14,7 @@ from collections.abc import Iterator
 from typing import Any, Optional
 
 import httpx
+import tiktoken
 from nltk import sent_tokenize
 from openai import OpenAI
 
@@ -206,6 +207,59 @@ class ChatCompletionsApiModelHandler(BaseHandler[LLMIn, LLMOut]):
 
         self.warmup()
 
+    def _get_max_context(self) -> int:
+        """Try to get the model's max context length via GET /v1/models."""
+        try:
+            resp = self.client.models.list(timeout=self.request_timeout)
+            data = resp.data
+            if data:
+                m = data[0]
+                # Standard OpenAI fields
+                ctx = getattr(m, "max_context_length", None) or getattr(m, "context_length", None)
+                if ctx:
+                    return int(ctx)
+                # llama.cpp stores it in model_extra['meta']['n_ctx']
+                extra = getattr(m, "model_extra", None)
+                if extra:
+                    meta = extra.get("meta", {})
+                    n_ctx = meta.get("n_ctx") or meta.get("n_ctx_train")
+                    if n_ctx:
+                        return int(n_ctx)
+        except Exception:
+            pass
+        return 0
+
+    def _count_tokens(self, messages: list[dict]) -> int:
+        """Estimate token count for a messages list using tiktoken."""
+        try:
+            enc = tiktoken.encoding_for_model(self.model_name)
+        except KeyError:
+            enc = tiktoken.get_encoding("cl100k_base")
+
+        # Per-message overhead: ~3 tokens for role/content structure
+        tokens = len(messages) * 3
+
+        for msg in messages:
+            tokens += len(enc.encode(str(msg.get("role", ""))))
+            content = msg.get("content", "")
+            if isinstance(content, list):
+                content = " ".join(
+                    c.get("text", "")
+                    for c in content
+                    if isinstance(c, dict) and c.get("type") in ("input_text", "output_text")
+                )
+            tokens += len(enc.encode(str(content)))
+            for tc in msg.get("tool_calls", []):
+                tokens += len(enc.encode(json.dumps(tc)))
+            if msg.get("tool_call_id"):
+                tokens += len(enc.encode(msg["tool_call_id"]))
+
+        # Tool definitions sent with every request
+        if self.tools:
+            tokens += len(enc.encode(json.dumps(self.tools)))
+
+        return max(1, tokens)
+
     def _resolve_model(self, fallback_model: Optional[str]) -> str:
         """Try to auto-detect model via GET /v1/models; fall back to param."""
         try:
@@ -240,17 +294,21 @@ class ChatCompletionsApiModelHandler(BaseHandler[LLMIn, LLMOut]):
         client = self.client
         model_name = self.model_name
         timeout = self.request_timeout
+        extra_body = self._extra_body
 
         def generate(system: str, user: str) -> str:
-            response = client.chat.completions.create(
-                model=model_name,
-                messages=[
+            kwargs = {
+                "model": model_name,
+                "messages": [
                     {"role": "system", "content": system},
                     {"role": "user", "content": user},
                 ],
-                max_tokens=1024,
-                timeout=timeout,
-            )
+                "max_tokens": 1024,
+                "timeout": timeout,
+            }
+            if extra_body is not None:
+                kwargs["extra_body"] = extra_body
+            response = client.chat.completions.create(**kwargs)
             return response.choices[0].message.content or ""
 
         return generate
@@ -359,7 +417,12 @@ class ChatCompletionsApiModelHandler(BaseHandler[LLMIn, LLMOut]):
 
         for iteration in range(5):
             messages = _build_openai_messages(active_chat)
-            logger.debug("=== LLM iteration %d: sending %d messages ===", iteration, len(messages))
+            est_tokens = self._count_tokens(messages)
+            max_ctx = self._get_max_context()
+            pct = (est_tokens / max_ctx * 100) if max_ctx else 0
+            logger.info("=== LLM iteration %d: %d messages in context, buffer=%d items, user_turns=%d, est_tokens=%d/%d (%.1f%%) ===",
+                        iteration, len(messages), len(active_chat.buffer), active_chat._user_turn_count,
+                        est_tokens, max_ctx, pct)
 
             try:
                 stream = self.client.chat.completions.create(

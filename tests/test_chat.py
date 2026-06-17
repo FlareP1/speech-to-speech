@@ -1177,6 +1177,103 @@ class TestCompaction:
 
         assert chat.init_chat_message is sys_msg
 
+    def test_compaction_with_dict_entries_in_buffer(self):
+        """Compaction must not crash when buffer contains plain dicts (chat-completions backend)."""
+        chat = Chat(size=2)
+        captured: list = []
+        compactor = _make_stub_compactor(captured=captured)
+
+        # Simulate chat-completions backend: add object turns mixed with dict entries
+        chat.add_item(_user("u0"))
+        chat.add_item(_assistant("a0"))
+
+        # Dict entries that the chat-completions backend appends directly to buffer
+        chat.buffer.append({
+            "role": "assistant",
+            "content": "tool assistant text",
+            "tool_calls": [{"id": "call_1", "type": "function", "function": {"name": "search", "arguments": "{}"}}],
+        })
+        chat.buffer.append({
+            "role": "tool",
+            "tool_call_id": "call_1",
+            "content": "search result",
+        })
+
+        chat.add_item(_user("u1"))
+        chat.add_item(_assistant("a1"))
+
+        # Dict entries from second tool round
+        chat.buffer.append({
+            "role": "assistant",
+            "content": "more text",
+            "tool_calls": [],
+        })
+        chat.buffer.append({
+            "role": "tool",
+            "tool_call_id": "call_2",
+            "content": "tool output",
+        })
+
+        # Trigger compaction (need > size user turns)
+        chat.add_item(_user("u2"))
+        chat.add_item(_assistant("a2"))
+        chat.add_item(_user("u3"))
+        chat.trim_if_needed(compactor)
+
+        _wait_thread(chat)
+
+        # Should complete without AttributeError
+        assert len(captured) == 1
+        snapshot = captured[0]
+        # Dict entries should pass through snapshot unchanged
+        dict_roles = [item.get("role") for item in snapshot if isinstance(item, dict)]
+        assert "assistant" in dict_roles
+        assert "tool" in dict_roles
+
+    def test_compaction_with_only_dict_entries_has_no_marker_ids(self):
+        """When buffer only has dicts (no object entries with .id), compaction is skipped."""
+        chat = Chat(size=2)
+        captured: list = []
+        compactor = _make_stub_compactor(captured=captured)
+
+        # Fill with dict entries only
+        for i in range(4):
+            chat.buffer.append({
+                "role": "user" if i % 2 == 0 else "assistant",
+                "content": f"turn {i}",
+            })
+
+        chat.add_item(_user("u_final"))
+        chat.trim_if_needed(compactor)
+
+        _wait_thread(chat)
+
+        # No marker_ids means compactor never ran
+        assert len(captured) == 0
+
+    def test_to_responses_api_chat_with_dict_entries(self):
+        """to_responses_api_chat must pass dict entries through without .id assertion failure."""
+        chat = Chat(size=10)
+
+        chat.add_item(_user("hello"))
+        chat.buffer.append({
+            "role": "assistant",
+            "content": "dict assistant response",
+        })
+        chat.buffer.append({
+            "role": "tool",
+            "tool_call_id": "call_abc",
+            "content": "tool output",
+        })
+
+        result = chat.to_responses_api_chat()
+        assert len(result) == 3
+        assert result[0]["role"] == "user"
+        assert result[1]["role"] == "assistant"
+        assert result[1]["content"] == "dict assistant response"
+        assert result[2]["role"] == "tool"
+        assert result[2]["tool_call_id"] == "call_abc"
+
     def test_snapshot_strips_images(self):
         chat = Chat(size=2)
         captured: list = []
