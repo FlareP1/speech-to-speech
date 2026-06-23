@@ -25,15 +25,21 @@ Session Prompt:
 """
 
 
-def build_text_system_prompt(session_prompt: str, *, tool_section: str = "") -> str:
+def build_text_system_prompt(
+    session_prompt: str,
+    *,
+    tool_section: str = "",
+    lead: str | None = None,
+    tail: str | None = None,
+) -> str:
     """Context → session prompt → optional tool block → strongest text rules last."""
     tools = tool_section.strip()
     optional_tools = f"\n\n{tools}" if tools else ""
     return _TEXT_SYSTEM_PROMPT_FULL.format(
-        lead=TEXT_SYSTEM_PROMPT_LEAD.rstrip(),
+        lead=(lead if lead is not None else TEXT_SYSTEM_PROMPT_LEAD).rstrip(),
         session_prompt=session_prompt.strip(),
         optional_tools=optional_tools,
-        tail=TEXT_SYSTEM_PROMPT_TAIL.rstrip(),
+        tail=(tail if tail is not None else TEXT_SYSTEM_PROMPT_TAIL).rstrip(),
     )
 
 

@@ -98,6 +98,10 @@ def _make_handler(*, compact_history=False, mcp_enabled=False, mcp_server_url=No
     handler.max_tokens = 4096
     handler.compact_history = compact_history
     handler.suppress_tool_call_flush = True
+    handler.voice_prompt_lead = None
+    handler.voice_prompt_tail = None
+    handler.init_chat_prompt_voice_lead = ""
+    handler.init_chat_prompt_voice_tail = ""
     return handler
 
 

@@ -1,4 +1,5 @@
 from dataclasses import dataclass, field
+from typing import Optional
 
 
 @dataclass
@@ -18,6 +19,38 @@ class LanguageModelBaseArguments:
     init_chat_prompt: str = field(
         default="You are a helpful and friendly AI assistant. You are polite, respectful, and aim to provide concise responses of less than 20 words.",
         metadata={"help": "The initial chat prompt to establish context for the language model."},
+    )
+    init_chat_prompt_voice_lead: str = field(
+        default="",
+        metadata={
+            "help": "Override the voice-channel system prompt lead section (inline). "
+            "Use --init_chat_prompt_voice_lead_file for longer prompts. "
+            "Default (from code): 'You are in a spoken conversation. The user speaks and hears you. "
+            "The session prompt defines persona, facts, goals, and tool descriptions. "
+            "These channel rules only control spoken output and tool-use behavior.'"
+        },
+    )
+    init_chat_prompt_voice_lead_file: Optional[str] = field(
+        default=None,
+        metadata={
+            "help": "Path to a file containing the voice-channel system prompt lead section. "
+            "Overrides --init_chat_prompt_voice_lead if set."
+        },
+    )
+    init_chat_prompt_voice_tail: str = field(
+        default="",
+        metadata={
+            "help": "Override the voice-channel system prompt tail section (inline). "
+            "Use --init_chat_prompt_voice_tail_file for longer prompts. "
+            "Default (from code): '## Voice Rules ...' (see voice_prompt.py)"
+        },
+    )
+    init_chat_prompt_voice_tail_file: Optional[str] = field(
+        default=None,
+        metadata={
+            "help": "Path to a file containing the voice-channel system prompt tail section. "
+            "Overrides --init_chat_prompt_voice_tail if set."
+        },
     )
     chat_size: int = field(
         default=30,

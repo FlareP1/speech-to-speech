@@ -29,15 +29,21 @@ Session Prompt:
 """
 
 
-def build_voice_system_prompt(session_prompt: str, *, tool_section: str = "") -> str:
+def build_voice_system_prompt(
+    session_prompt: str,
+    *,
+    tool_section: str = "",
+    lead: str | None = None,
+    tail: str | None = None,
+) -> str:
     """Context → session prompt → optional tool block → strongest voice rules last."""
     tools = tool_section.strip()
     optional_tools = f"\n\n{tools}" if tools else ""
     return _VOICE_SYSTEM_PROMPT_FULL.format(
-        lead=VOICE_SYSTEM_PROMPT_LEAD.rstrip(),
+        lead=(lead if lead is not None else VOICE_SYSTEM_PROMPT_LEAD).rstrip(),
         session_prompt=session_prompt.strip(),
         optional_tools=optional_tools,
-        tail=VOICE_SYSTEM_PROMPT_TAIL.rstrip(),
+        tail=(tail if tail is not None else VOICE_SYSTEM_PROMPT_TAIL).rstrip(),
     )
 
 

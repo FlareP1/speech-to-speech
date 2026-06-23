@@ -3,6 +3,7 @@ from __future__ import annotations
 import logging
 from abc import ABC, abstractmethod
 from collections.abc import Iterator
+from pathlib import Path
 from typing import Any, Optional
 
 import httpx
@@ -137,6 +138,10 @@ class BaseOpenAICompatibleHandler(BaseHandler[LLMIn, LLMOut], ABC):
         stream_batch_sentences: int = 3,
         enable_lang_prompt: bool = False,
         compact_history: bool = False,
+        init_chat_prompt_voice_lead: str = "",
+        init_chat_prompt_voice_lead_file: Optional[str] = None,
+        init_chat_prompt_voice_tail: str = "",
+        init_chat_prompt_voice_tail_file: Optional[str] = None,
         **_kwargs: Any,
     ) -> None:
         self.cancel_scope = cancel_scope
@@ -150,6 +155,17 @@ class BaseOpenAICompatibleHandler(BaseHandler[LLMIn, LLMOut], ABC):
         self.request_timeout = httpx.Timeout(
             self.request_timeout_s,
             connect=min(10.0, self.request_timeout_s),
+        )
+        # Resolution: file > inline > module default (None)
+        self.voice_prompt_lead = (
+            Path(init_chat_prompt_voice_lead_file).read_text().strip()
+            if init_chat_prompt_voice_lead_file
+            else (init_chat_prompt_voice_lead or None)
+        )
+        self.voice_prompt_tail = (
+            Path(init_chat_prompt_voice_tail_file).read_text().strip()
+            if init_chat_prompt_voice_tail_file
+            else (init_chat_prompt_voice_tail or None)
         )
 
         self.user_role = user_role
@@ -261,7 +277,11 @@ class BaseOpenAICompatibleHandler(BaseHandler[LLMIn, LLMOut], ABC):
     ) -> None:
         if instructions:
             builder = build_voice_system_prompt if wants_audio else build_text_system_prompt
-            full_instructions = builder(instructions)
+            full_instructions = builder(
+                instructions,
+                lead=self.voice_prompt_lead if wants_audio else None,
+                tail=self.voice_prompt_tail if wants_audio else None,
+            )
             chat.add_item(make_system_message(full_instructions))
 
     # ── output helpers ──────────────────────────────────────────────────────--

@@ -157,6 +157,10 @@ class ChatCompletionsApiModelHandler(BaseOpenAICompatibleHandler):
         request_timeout_s: float = 120.0,
         max_tokens: int = 4096,
         compact_history: bool = True,
+        init_chat_prompt_voice_lead: str = "",
+        init_chat_prompt_voice_lead_file: str | None = None,
+        init_chat_prompt_voice_tail: str = "",
+        init_chat_prompt_voice_tail_file: str | None = None,
         gen_kwargs: dict[str, Any] = {},
         **_kwargs: Any,
     ) -> None:
@@ -172,6 +176,10 @@ class ChatCompletionsApiModelHandler(BaseOpenAICompatibleHandler):
             enable_lang_prompt=enable_lang_prompt,
             request_timeout_s=request_timeout_s,
             compact_history=compact_history,
+            init_chat_prompt_voice_lead=init_chat_prompt_voice_lead,
+            init_chat_prompt_voice_lead_file=init_chat_prompt_voice_lead_file,
+            init_chat_prompt_voice_tail=init_chat_prompt_voice_tail,
+            init_chat_prompt_voice_tail_file=init_chat_prompt_voice_tail_file,
             gen_kwargs=gen_kwargs,
         )
         self.stream = True  # Always stream; _iter_response_events not supported
