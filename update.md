@@ -2,7 +2,45 @@
 
 ## Branch: `mcp-tool-call`
 
-This branch adds a new `chat-completions` LLM backend with MCP (Model Context Protocol) tool calling support, along with pipeline fixes and dependency hardening.
+This branch adds a new `chat-completions` LLM backend with MCP (Model Context Protocol) tool calling support, along with pipeline fixes and dependency hardening. As of June 2026, 36 commits from upstream `huggingface/speech-to-speech` (v0.2.10) have been merged.
+
+---
+
+## Upstream Merge (v0.2.10)
+
+36 commits merged from `huggingface/speech-to-speech` upstream:
+
+### BaseOpenAICompatibleHandler
+New shared base class for OpenAI-compatible LLM backends (`BaseOpenAICompatibleHandler`). Extracts common lifecycle logic (speculative-turn gating, cancellation, sentence batching, text-only vs audio handling, history write-back, token usage, out-of-band responses, error termination) so both the Responses API and Chat Completions handlers share the same orchestration code.
+
+### VAD Improvements
+- Speech continuation hysteresis (192ms threshold)
+- Noise floor applied to early speech start and stitch gaps
+- Adjacent short VAD segment stitching
+- Low-latency timing profile defaults
+- Unanswered speculative turn reopening past grace window
+
+### Out-of-Band Responses
+- `build_active_chat()` / `add_supported_item()` in `chat.py`
+- Text-only and `conversation=none` response support
+- Assistant transcript emission for fresh responses when discard guard is stuck
+
+### Tool Calling Fixes
+- Tool follow-up deferral until outputs complete
+- Tool-only realtime response completion fix
+- Voice prompt lead-ins shortened and improved
+- Usage attribution preserved across response boundaries
+
+### Paraformer
+- Progressive transcription events fix
+- Optional dependency import guard
+
+### Speculative Turns
+- 334+ new tests for speculative turn handling
+- Unanswered speech turn merging
+
+### Version
+- Bumped to 0.2.10
 
 ---
 
@@ -16,12 +54,16 @@ A new LLM backend using the OpenAI Chat Completions API (`client.chat.completion
 - Streaming text deltas with sentence-batched TTS forwarding
 - MCP tool calling in a multi-turn loop (up to 5 iterations)
 - Thinking suppression via `extra_body` for local models
+- `reasoning_effort` support (upstream addition)
 - Model auto-detection via `GET /v1/models`
 - Reasoning content logging to stderr
 - Fallback response when tool loop exhausts without producing text
 - Compaction support (same as responses API)
 - Speculative turn cancellation (same as responses API)
 - Passthrough of arbitrary `gen_kwargs` to the API call
+- Accurate token counting with tiktoken and context % logging
+
+**Note:** The handler is currently standalone (not extending `BaseOpenAICompatibleHandler`). Migration to the base class is deferred to a follow-up PR.
 
 ### 2. MCP Tool Calling
 
@@ -48,28 +90,31 @@ A new `MCPClient` class communicates with [mcp-proxy](https://github.com/chrisha
 
 - `pyproject.toml` now pins `torch`, `torchaudio`, and `torchvision` to `+cu126` versions on Windows/Linux
 - Added `[[tool.uv.index]]` pointing to the PyTorch CUDA index, so `uv sync` installs CUDA wheels instead of CPU-only builds
+- Added `tiktoken>=0.3.3` for accurate token counting
 
 ---
 
-## New CLI Options
+## CLI Options
+
+The `chat-completions` backend shares connection flags with the `responses-api` backend (via `ChatCompletionsLanguageModelHandlerArguments` subclassing).
 
 | Option | Default | Description |
 |--------|---------|-------------|
-| `--llm_backend chat-completions` | `responses-api` | Select the chat completions backend (new value alongside `transformers`, `mlx-lm`, `responses-api`) |
-| `--chat_completions_api_base_url` | `http://127.0.0.1:8080/v1` | Base URL for the OpenAI-compatible chat completions API |
-| `--chat_completions_api_api_key` | `none` | API key for the chat completions endpoint |
-| `--chat_completions_api_model` | `Qwen3.6-27B` | Model name (auto-detected from `/v1/models` if available) |
+| `--llm_backend chat-completions` | `responses-api` | Select the chat completions backend |
+| `--responses_api_base_url` | `None` | Base URL for the OpenAI-compatible API (used by both backends) |
+| `--responses_api_api_key` | `None` | API key (used by both backends) |
+| `--responses_api_disable_thinking` | `True` | Suppress `<thinking>` blocks (used by both backends) |
+| `--responses_api_reasoning_effort` | `None` | Provider-specific reasoning level (chat-completions only) |
+| `--model_name` | `Qwen3.6-27B` | Model name (auto-detected from `/v1/models` if available) |
 | `--mcp_server_url` | `http://127.0.0.1:8008` | Base URL for the mcp-proxy server |
-| `--mcp_servers` | `time,ddg-search` | Comma-separated list of MCP server names to connect to |
-| `--mcp_enabled` | `False` | Enable MCP tool calling with the chat completions backend |
-| `--chat_completions_max_tokens` | `4096` | Maximum tokens to generate per response |
-| `--chat_completions_request_timeout_s` | `120.0` | Request timeout in seconds for API calls |
+| `--mcp_servers` | `time,ddg-search` | Comma-separated list of MCP server names |
+| `--mcp_enabled` | `False` | Enable MCP tool calling |
 
-Inherited from `LanguageModelBaseArguments` (also available for this backend):
-- `--chat_size` — number of conversation turns to keep in context (default: 10)
-- `--compact_history` — enable conversation history compaction
-- `--disable_thinking` — suppress `<thinking>` blocks (default: `True`)
-- `--speculative_turns` — speculative turn tracking settings
+Inherited from `LanguageModelBaseArguments`:
+- `--chat_size` — conversation turns to keep in context (default: 30)
+- `--compact_history` — enable conversation history compaction (default: True)
+- `--stream_batch_sentences` — sentences per batch (default: 3)
+- `--enable_lang_prompt` — append language instruction (default: False)
 
 ---
 
@@ -77,9 +122,11 @@ Inherited from `LanguageModelBaseArguments` (also available for this backend):
 
 | File | Description |
 |------|-------------|
-| `src/speech_to_speech/LLM/chat_completions_language_model.py` | Chat completions LLM handler with MCP tool loop |
+| `src/speech_to_speech/LLM/chat_completions_language_model.py` | Chat completions LLM handler with MCP tool loop (our version) |
 | `src/speech_to_speech/LLM/mcp_client.py` | Synchronous MCP client (JSON-RPC 2.0 over HTTP) |
-| `src/speech_to_speech/arguments_classes/chat_completions_language_model_arguments.py` | CLI argument definitions for the chat completions backend |
+| `src/speech_to_speech/LLM/base_openai_compatible_language_model.py` | Shared base class (upstream — not yet used by our handler) |
+| `src/speech_to_speech/LLM/text_prompt.py` | Text-only system prompt builder (upstream) |
+| `src/speech_to_speech/arguments_classes/chat_completions_language_model_arguments.py` | CLI arguments (extends ResponsesApi, adds MCP fields) |
 | `Install.bat` | Windows setup script: creates venv, runs `uv sync`, installs CUDA torch |
 | `Run Speech Detection.bat` | Updated to use `uv` venv and `speech-to-speech` entry point |
 
@@ -89,9 +136,14 @@ Inherited from `LanguageModelBaseArguments` (also available for this backend):
 
 | File | Changes |
 |------|---------|
-| `pyproject.toml` | Pinned CUDA torch versions, added PyTorch CUDA index for `uv sync` |
-| `src/speech_to_speech/arguments_classes/module_arguments.py` | Added `chat-completions` as valid `llm_backend` option |
-| `src/speech_to_speech/s2s_pipeline.py` | Registered chat completions args, routed kwargs correctly, updated backend dispatcher |
+| `pyproject.toml` | CUDA torch pins, PyTorch CUDA index, tiktoken, version 0.2.10 |
+| `src/speech_to_speech/LLM/chat.py` | Dict handling in compaction + upstream `build_active_chat()` |
+| `src/speech_to_speech/arguments_classes/module_arguments.py` | Added `chat-completions` as valid `llm_backend` |
+| `src/speech_to_speech/s2s_pipeline.py` | Upstream pipeline with `chat-completions` dispatcher |
+| `src/speech_to_speech/VAD/vad_handler.py` | VAD improvements from upstream |
+| `src/speech_to_speech/STT/paraformer_handler.py` | Paraformer progressive events fix |
+| `tests/test_chat.py` | Dict handling tests + upstream `TestBuildActiveChat` |
+| `tests/test_chat_completions_language_model.py` | 8 tests for handler (tool loop, fallback, compaction, messages) |
 
 ---
 
@@ -102,8 +154,8 @@ speech-to-speech --mode local \
   --stt parakeet-tdt \
   --llm_backend chat-completions \
   --tts qwen3 \
-  --chat_completions_api_base_url http://127.0.0.1:8080/v1 \
-  --chat_completions_api_api_key none \
+  --responses_api_base_url http://127.0.0.1:8080/v1 \
+  --responses_api_api_key none \
   --mcp_server_url http://127.0.0.1:8008 \
   --mcp_servers time,ddg-search \
   --mcp_enabled \
@@ -115,6 +167,10 @@ speech-to-speech --mode local \
   --qwen3_tts_ref_audio MYRA_referenceShort.wav \
   --qwen3_tts_ref_text "Hi there"
 ```
+
+**Note:** The connection flags use the `--responses_api_*` prefix (shared naming convention). The handler still calls the Chat Completions API (`/v1/chat/completions`) for tool calls.
+
+---
 
 ## Bug Fixes & Improvements
 
@@ -134,13 +190,32 @@ llama.cpp models don't expose `max_context_length` or `context_length` fields. A
 Replaced 4-char-per-token heuristic with `tiktoken`-based counting that uses the correct encoding per model name (with cl100k_base fallback). Counts tool definitions and tool call metadata.
 
 ### Tests
-Added 11 new tests: 8 for chat-completions backend (tool loop, fallback, compaction, message building) and 3 for dict handling in compaction/serialization.
+Added 11 new tests: 8 for chat-completions backend (tool loop, fallback, compaction, message building) and 3 for dict handling in compaction/serialization. Upstream added 334+ tests for speculative turns, VAD, and realtime service.
+
+### Test Count
+**547 tests passing** (upstream: ~446, our additions: 11, shared: ~90)
+
+---
+
+## Deferred Work (Follow-up PRs)
+
+### Migrate to BaseOpenAICompatibleHandler
+Refactor `ChatCompletionsApiModelHandler` to extend `BaseOpenAICompatibleHandler`. Benefits: better cancellation, text-only mode, timeout handling, out-of-band responses. MCP tool loop would need to be adapted (either wrapped around base class `process()` or moved to pipeline level).
+
+### Move Token Counting to Utilities
+Move `_count_tokens()` and `_get_max_context()` to `utils/utils.py` for reuse across backends.
+
+---
 
 ## Commits
 
 ```
+36c147c Restore custom AGENTS.md with project-specific rules
+07475fe Merge upstream/main: VAD improvements, out-of-band responses, base class, spec turns
+365fd29 Update branch notes: compaction fixes, token counting, tests
 2b17548 Add tiktoken as runtime dependency
 9152148 Fix compaction crashes and add accurate token counting
+72fb521 Add update.md summarizing mcp-tool-call branch changes
 79fe50a Fix init_chat_prompt for chat-completions backend, add tool loop fallback, pin CUDA torch
 4f90236 Align chat completions backend with responses API
 d7f84c1 Add reasoning content logging and debug output to chat completions backend
