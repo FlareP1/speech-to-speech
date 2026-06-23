@@ -96,6 +96,8 @@ def _make_handler(*, compact_history=False, mcp_enabled=False, mcp_server_url=No
     handler.stream = True
     handler.enable_lang_prompt = False
     handler.max_tokens = 4096
+    handler.compact_history = compact_history
+    handler.suppress_tool_call_flush = True
     return handler
 
 
@@ -149,20 +151,17 @@ def test_tool_loop_executes_tool_and_continues_then_compacts():
     """Simulate a full tool loop: tool call → MCP result → text response, then compaction."""
     handler = _make_handler(compact_history=True)
 
-    # Stub MCP client
     mcp_client = MagicMock()
     mcp_client.execute_tool.return_value = '{"time": "12:00"}'
     handler.mcp_client = mcp_client
     handler.tools = [{"type": "function", "function": {"name": "get_time", "parameters": {}}}]
 
-    # Simulate stream: first iteration returns tool_calls, second returns text
     call_count = 0
 
     def fake_create(**kwargs):
         nonlocal call_count
         call_count += 1
         if call_count == 1:
-            # First call: tool_calls
             return [
                 _make_stream_chunk(
                     _make_text_delta(""),
@@ -171,7 +170,6 @@ def test_tool_loop_executes_tool_and_continues_then_compacts():
                 )
             ]
         else:
-            # Second call: text response
             return [
                 _make_stream_chunk(_make_text_delta("The time is 12:00."), finish_reason="stop"),
             ]
@@ -181,32 +179,19 @@ def test_tool_loop_executes_tool_and_continues_then_compacts():
     cfg = _make_runtime_config(chat_size=2)
     cfg.chat.add_item(make_user_message("What time is it?"))
 
-    outputs = list(handler._generate(
-        active_chat=cfg.chat,
-        original_chat=cfg.chat,
-        language_code=None,
-        gen=None,
-        runtime_config=cfg,
-        response=None,
-        req_tools=handler.tools,
-        turn_id="turn_1",
-        turn_revision=1,
-        speech_stopped_at_s=None,
-    ))
+    request = GenerateResponseRequest(runtime_config=cfg)
+    outputs = list(handler.process(request))
 
-    # Should have: text chunk + EndOfResponse
-    text_chunks = [o for o in outputs if isinstance(o, LLMResponseChunk)]
+    text_chunks = [o for o in outputs if isinstance(o, LLMResponseChunk) and o.text]
     eos = [o for o in outputs if isinstance(o, EndOfResponse)]
     assert len(text_chunks) == 1
     assert text_chunks[0].text == "The time is 12:00."
     assert len(eos) == 1
 
-    # MCP was called once
     mcp_client.execute_tool.assert_called_once_with("get_time", {})
 
-    # Dict entries should be in buffer (assistant with tool_calls + tool result)
     dict_entries = [e for e in cfg.chat.buffer if isinstance(e, dict)]
-    assert len(dict_entries) >= 2  # assistant + tool message
+    assert len(dict_entries) >= 2
 
 
 def test_tool_loop_exhaustion_yields_fallback():
@@ -236,20 +221,10 @@ def test_tool_loop_exhaustion_yields_fallback():
     cfg = _make_runtime_config(chat_size=2)
     cfg.chat.add_item(make_user_message("Do something"))
 
-    outputs = list(handler._generate(
-        active_chat=cfg.chat,
-        original_chat=cfg.chat,
-        language_code=None,
-        gen=None,
-        runtime_config=cfg,
-        response=None,
-        req_tools=handler.tools,
-        turn_id="turn_1",
-        turn_revision=1,
-        speech_stopped_at_s=None,
-    ))
+    request = GenerateResponseRequest(runtime_config=cfg)
+    outputs = list(handler.process(request))
 
-    text_chunks = [o for o in outputs if isinstance(o, LLMResponseChunk)]
+    text_chunks = [o for o in outputs if isinstance(o, LLMResponseChunk) and o.text]
     assert len(text_chunks) == 1
     assert "I wasn't able to find the information" in text_chunks[0].text
 
@@ -258,7 +233,6 @@ def test_compaction_with_dict_entries_does_not_crash():
     """Compaction should handle dict entries in buffer without AttributeError."""
     handler = _make_handler(compact_history=True)
 
-    # Stub compactor that tracks calls
     captured = []
 
     def stub_compactor(snapshot):
@@ -272,26 +246,20 @@ def test_compaction_with_dict_entries_does_not_crash():
     cfg.chat.add_item(make_user_message("u0"))
     cfg.chat.add_item(make_assistant_message("a0"))
 
-    # Add dict entries (simulating chat-completions backend tool loop history)
     cfg.chat.buffer.append({"role": "assistant", "content": "tool assistant", "tool_calls": []})
     cfg.chat.buffer.append({"role": "tool", "tool_call_id": "call_1", "content": "result"})
 
     cfg.chat.add_item(make_user_message("u1"))
     cfg.chat.add_item(make_assistant_message("a1"))
 
-    # Add dict entries from second round
     cfg.chat.buffer.append({"role": "assistant", "content": "more text"})
     cfg.chat.buffer.append({"role": "tool", "tool_call_id": "call_2", "content": "output"})
 
-    # Trigger compaction (need > size user turns)
     cfg.chat.add_item(make_user_message("u2"))
     cfg.chat.add_item(make_assistant_message("a2"))
     cfg.chat.add_item(make_user_message("u3"))
 
-    # This should NOT raise AttributeError: 'dict' object has no attribute 'id'
     cfg.chat.trim_if_needed(handler.compactor)
 
-    # Compaction should have been triggered
     assert len(captured) == 1
-    # Buffer should have summary + remaining items
     assert len(cfg.chat.buffer) > 0

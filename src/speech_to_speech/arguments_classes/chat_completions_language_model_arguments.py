@@ -38,3 +38,21 @@ class ChatCompletionsLanguageModelHandlerArguments(ResponsesApiLanguageModelHand
         default=False,
         metadata={"help": "Enable MCP tool calling with the chat completions backend."},
     )
+    responses_api_request_timeout_s: float = field(
+        default=20.0,
+        metadata={
+            "help": "Request timeout in seconds for API calls. Default is 20.0."
+        },
+    )
+    max_tokens: int = field(
+        default=4096,
+        metadata={"help": "Maximum number of tokens to generate per request. Default is 4096."},
+    )
+    suppress_tool_call_flush: bool = field(
+        default=True,
+        metadata={
+            "help": "When True, suppresses streaming text output before tool calls, holding text "
+            "until the final response. Use True for smooth playback with MCP tools (old behavior). "
+            "Use False to speak preamble text before tools execute (new behavior). Default is True."
+        },
+    )
