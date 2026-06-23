@@ -6,6 +6,7 @@ PipelineUnit pool (size 1, matching the single-session semantics of the
 old tests) so there is no cross-test state.
 """
 
+import asyncio
 import base64
 import time
 from queue import Empty, Queue
@@ -13,6 +14,7 @@ from threading import Event as ThreadingEvent
 
 import pytest
 from starlette.testclient import TestClient
+from starlette.websockets import WebSocketState
 
 import speech_to_speech.api.openai_realtime.websocket_router as router_module
 from speech_to_speech.api.openai_realtime.pipeline_unit import PipelineUnit
@@ -109,6 +111,16 @@ def _simulate_session_end_drain(input_queue: Queue, output_queue: Queue, timeout
 
 def _pcm_bytes(n_samples: int) -> bytes:
     return b"\x00" * (n_samples * 2)
+
+
+class _FakeWebSocket:
+    application_state = WebSocketState.CONNECTED
+
+    def __init__(self):
+        self.sent: list[dict] = []
+
+    async def send_json(self, payload: dict) -> None:
+        self.sent.append(payload)
 
 
 # ===================================================================
@@ -448,6 +460,41 @@ class TestSendLoop:
                 assert delta["type"] == "response.output_audio.delta"
                 assert len(base64.b64decode(delta["delta"])) == len(_pcm_bytes(512))
 
+    def test_current_generation_text_survives_stuck_discarding(self, setup):
+        """Regression: a fresh response's transcript must survive a stuck discard guard.
+
+        A superseded speculative turn can leave ``cancel_scope.discarding`` stuck True
+        (its TTS dropped the stale ``EndOfResponse`` without emitting AUDIO_RESPONSE_DONE,
+        so ``response_done()`` never cleared the flag). The next response's audio is tagged
+        with the current generation and streams fine, but the assistant text used to be
+        blanket-dropped while discarding — leaving audio + ``response.done`` with no
+        ``response.output_audio_transcript.done``. The text is now discarded by the same
+        generation-aware rule as audio, so a current-generation transcript is kept.
+        """
+        app, _, _, output_queue, text_output_queue, _, _, _, cancel_scope = setup
+        with TestClient(app) as client:
+            with client.websocket_connect("/v1/realtime") as ws:
+                ws.receive_json()  # session.created
+                cancel_scope.cancel()  # discarding=True, generation bumped; sentinel never arrived
+                current_generation = cancel_scope.generation
+                assert cancel_scope.discarding
+
+                text_output_queue.put(AssistantTextEvent(text="hello there", cancel_generation=current_generation))
+                output_queue.put(AudioOutput(audio=_pcm_bytes(256), cancel_generation=current_generation))
+                output_queue.put(AudioOutput(audio=AUDIO_RESPONSE_DONE, cancel_generation=current_generation))
+
+                types: list[str] = []
+                transcript = None
+                for _ in range(8):
+                    msg = ws.receive_json()
+                    types.append(msg["type"])
+                    if msg["type"] == "response.output_audio_transcript.done":
+                        transcript = msg["transcript"]
+                    if msg["type"] == "response.done":
+                        break
+                assert "response.output_audio_transcript.done" in types
+                assert transcript == "hello there"
+
     def test_stale_tagged_response_done_does_not_finish_current_response(self, setup):
         app, service, _, output_queue, _, _, _, _, cancel_scope = setup
         with TestClient(app) as client:
@@ -456,7 +503,7 @@ class TestSendLoop:
                 conn_id = list(service._conns.keys())[0]
                 stale_generation = cancel_scope.generation
                 service.response._ensure_response(conn_id)
-                service.finish_audio_response(conn_id, status="cancelled")
+                service.finish_response(conn_id, status="cancelled")
                 cancel_scope.cancel()
                 current_response_id, _ = service.response._ensure_response(conn_id)
 
@@ -492,6 +539,95 @@ class TestSendLoop:
                 assert service.total_usage.output_tokens == 5
                 assert service._state(conn_id).response_usage.input_tokens == 0
                 assert service._state(conn_id).response_usage.output_tokens == 0
+
+    def test_response_completion_drain_sends_pending_tool_before_done(self, setup):
+        _, service, input_queue, output_queue, text_output_queue, should_listen, _, response_playing, cancel_scope = (
+            setup
+        )
+        unit = PipelineUnit(
+            index=0,
+            service=service,
+            cancel_scope=cancel_scope,
+            should_listen=should_listen,
+            response_playing=response_playing,
+            input_queue=input_queue,
+            output_queue=output_queue,
+            text_output_queue=text_output_queue,
+            text_prompt_queue=Queue(),
+            handlers=[],
+        )
+        conn_id = service.register()
+        response_id, _ = service.response._ensure_response(conn_id)
+        text_output_queue.put(
+            AssistantTextEvent(
+                text="",
+                tools=[
+                    {
+                        "type": "function_call",
+                        "call_id": "c1",
+                        "name": "play_emotion",
+                        "arguments": '{"emotion":"loving"}',
+                    }
+                ],
+            )
+        )
+        text_output_queue.put(TokenUsageEvent(input_tokens=10, output_tokens=5))
+        ws = _FakeWebSocket()
+
+        asyncio.run(router_module._drain_pending_response_events(ws, unit, conn_id))
+        done_events = service.finish_response(conn_id)
+
+        assert [payload["type"] for payload in ws.sent] == ["response.function_call_arguments.done"]
+        assert [event.type for event in done_events] == ["response.output_audio.done", "response.done"]
+        assert ws.sent[0]["response_id"] == response_id
+        assert done_events[1].response.id == response_id
+        assert done_events[1].response.usage.input_tokens == 10
+        assert done_events[1].response.usage.output_tokens == 5
+        assert text_output_queue.empty()
+
+    def test_response_completion_drain_preserves_usage_across_non_response_boundary(self, setup):
+        _, service, input_queue, output_queue, text_output_queue, should_listen, _, response_playing, cancel_scope = (
+            setup
+        )
+        unit = PipelineUnit(
+            index=0,
+            service=service,
+            cancel_scope=cancel_scope,
+            should_listen=should_listen,
+            response_playing=response_playing,
+            input_queue=input_queue,
+            output_queue=output_queue,
+            text_output_queue=text_output_queue,
+            text_prompt_queue=Queue(),
+            handlers=[],
+        )
+        conn_id = service.register()
+        response_id, _ = service.response._ensure_response(conn_id)
+        text_output_queue.put(
+            AssistantTextEvent(
+                text="",
+                tools=[{"type": "function_call", "call_id": "c1", "name": "play_emotion", "arguments": "{}"}],
+            )
+        )
+        text_output_queue.put(SpeechStartedEvent())
+        text_output_queue.put(TokenUsageEvent(input_tokens=10, output_tokens=5))
+        text_output_queue.put(AssistantTextEvent(text="queued after boundary"))
+        ws = _FakeWebSocket()
+
+        asyncio.run(router_module._drain_pending_response_events(ws, unit, conn_id))
+        done_events = service.finish_response(conn_id)
+
+        assert [payload["type"] for payload in ws.sent] == ["response.function_call_arguments.done"]
+        assert ws.sent[0]["response_id"] == response_id
+        assert done_events[1].response.usage.input_tokens == 10
+        assert done_events[1].response.usage.output_tokens == 5
+
+        boundary = text_output_queue.get_nowait()
+        queued_assistant = text_output_queue.get_nowait()
+        assert isinstance(boundary, SpeechStartedEvent)
+        assert isinstance(queued_assistant, AssistantTextEvent)
+        assert queued_assistant.text == "queued after boundary"
+        assert text_output_queue.empty()
 
     def test_speech_started_does_not_cancel_when_interrupt_disabled(self, setup):
         """With interrupt_response=False, speech during playback should NOT cancel or flush."""

@@ -133,9 +133,11 @@ class ChatCompletionsApiModelHandler(BaseHandler[LLMIn, LLMOut]):
 
     def setup(
         self,
-        api_base_url: Optional[str] = None,
-        api_api_key: Optional[str] = None,
-        api_model: Optional[str] = None,
+        model_name: str = "Qwen3.6-27B",
+        base_url: Optional[str] = None,
+        api_key: Optional[str] = None,
+        disable_thinking: bool = True,
+        reasoning_effort: Optional[str] = None,
         mcp_server_url: Optional[str] = None,
         mcp_servers: Optional[str] = None,
         mcp_enabled: bool = False,
@@ -145,8 +147,7 @@ class ChatCompletionsApiModelHandler(BaseHandler[LLMIn, LLMOut]):
         enable_lang_prompt: bool = False,
         request_timeout_s: float = 120.0,
         max_tokens: int = 4096,
-        disable_thinking: bool = True,
-        compact_history: bool = False,
+        compact_history: bool = True,
         gen_kwargs: dict[str, Any] = {},
         **_kwargs: Any,
     ) -> None:
@@ -167,21 +168,18 @@ class ChatCompletionsApiModelHandler(BaseHandler[LLMIn, LLMOut]):
         )
 
         # OpenAI client
-        api_key = api_api_key or "sk-placeholder"
-        base_url = api_base_url
-        self.client = OpenAI(api_key=api_key, base_url=base_url)
+        self.client = OpenAI(api_key=api_key or "sk-placeholder", base_url=base_url)
 
         # Resolve model name: try auto-detect via GET /v1/models, fallback to param
-        self.model_name = self._resolve_model(api_model)
+        self.model_name = self._resolve_model(model_name)
 
-        # Thinking suppression — mirrors ResponsesApiModelHandler
-        self._extra_body = (
-            {"chat_template_kwargs": {"enable_thinking": False}}
-            if disable_thinking
-            and base_url is not None
-            and base_url != "https://api.openai.com/v1"
-            else None
-        )
+        # Thinking suppression — mirrors upstream _build_extra_body
+        if reasoning_effort:
+            self._extra_body = {"reasoning_effort": reasoning_effort}
+        elif disable_thinking and base_url is not None and base_url != "https://api.openai.com/v1":
+            self._extra_body = {"chat_template_kwargs": {"enable_thinking": False}}
+        else:
+            self._extra_body = None
 
         # MCP tools
         if mcp_enabled and mcp_server_url:

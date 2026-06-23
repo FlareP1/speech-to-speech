@@ -31,7 +31,8 @@ class ModuleArguments:
     llm_backend: Optional[Literal["transformers", "mlx-lm", "responses-api", "chat-completions"]] = field(
         default="responses-api",
         metadata={
-            "help": "The LLM backend to use. Either 'transformers', 'mlx-lm', 'responses-api', or 'chat-completions'. Default is 'responses-api'."
+            "help": "The LLM backend to use. Either 'transformers', 'mlx-lm', 'responses-api', or "
+            "'chat-completions' (OpenAI-compatible /v1/chat/completions). Default is 'responses-api'."
         },
     )
     tts: Optional[Literal["melo", "chatTTS", "facebookMMS", "pocket", "kokoro", "qwen3"]] = field(
