@@ -1,26 +1,37 @@
-# Repository Instructions
+# CRITICAL RULES - MUST FOLLOW
 
-- Never include `codex` in branch names or pull request titles.
-- Keep release pull requests focused on version metadata and release documentation.
-- Do not commit local build artifacts such as `dist/`, `build/`, or generated wheel/sdist files.
+Ask, dont assume. If something's unclear, ask before writing a line and no silent guesses about intent, architecture, or requirements.
+Simplest solution first and implement the minimum thing that works. No abstractions you didn't request.
+Dont touch unrelated code and if a file isnt part of the current task, leave it.
+Flag uncertainty explicitly or if you're not confident, say so before proceeding as confidence without certainty causes more damage than admitting a gap.
 
-## Publishing to PyPI
+## RESPONSES
 
-PyPI publishing is handled by GitHub Actions in `.github/workflows/publish.yml`. The workflow runs on pushed tags that match `v*`, builds the package with `uv build`, checks the artifacts with `twine check --strict`, and publishes through the configured `pypi` environment.
+- Keep responses concise and to the point - unless the user asks otherwise
 
-To prepare a release:
+## PLANNING MODE
 
-1. Confirm the intended version is not already published on PyPI.
-2. Bump `version` in `pyproject.toml`.
-3. Bump `__version__` in `src/speech_to_speech/__init__.py`.
-4. Open and merge a pull request with only the release preparation changes.
+- Always ask clarifying questions
+- Never assume design, tech stack or features
+- Use deep-dive sub-agents to assist with research
+- Use deep-dive sub-agents to review the different aspects of your plan before presenting to the user
 
-To publish after the release PR is merged:
+## CHANGE / EDIT MODE
 
-1. Update `main` locally: `git checkout main && git pull origin main`.
-2. Create an annotated tag for the version: `git tag -a vX.Y.Z -m "Release vX.Y.Z"`.
-3. Push the tag: `git push origin vX.Y.Z`.
-4. Watch the `Publish` GitHub Actions workflow complete successfully.
-5. Verify the new version appears at `https://pypi.org/project/speech-to-speech/`.
+- Never implement features yourself when possible - use sub-agents!
+- Identify changes from the plan that can be implemented independently, and use sub-agents to implement the features efficiently.
+- ONLY USE ONE SUB-AGENT AT A TIME.  
+- When using sub-agents to implement features, act as a coordinator only
+- Use the best model for the task - premium models for complex tasks (like coding) and mid-tier models for simpler tasks, like documentation
+- After completing features (large or small), always run commands like lint, type check and next build to check code quality
 
-Only upload manually if the GitHub Actions workflow is unavailable and the maintainers have explicitly chosen that fallback.
+## DATABASE SCHEMA CHANGES
+
+- Whenever you make changes to the database schema, ALWAYS run the drizzle generate and migrate commands
+- NEVER run drizzle push!
+
+## TESTING
+
+- Use any testing tools, libraries available to the project for testing your changes
+- Never assume your changes simply work, always test!
+- If the project does not have any testing tools, scripts, MCP tools, skills, etc. available for testing, ask the user whether testing should be skipped.
