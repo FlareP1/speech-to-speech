@@ -93,6 +93,13 @@ def _make_handler(*, compact_history=False, mcp_enabled=False, mcp_server_url=No
     handler.mcp_client = None
     handler.tools = []
     handler.compactor = None
+    handler._pending_messages = None
+    handler._pending_turn_id = None
+    handler._pending_turn_revision = None
+    handler._pending_insert_pos = None
+    handler._pending_prev_baseline = None
+    handler._turn_baseline = 0
+    handler._prev_baseline = 0
     handler.stream = True
     handler.enable_lang_prompt = False
     handler.max_tokens = 4096
@@ -193,6 +200,10 @@ def test_tool_loop_executes_tool_and_continues_then_compacts():
     assert len(eos) == 1
 
     mcp_client.execute_tool.assert_called_once_with("get_time", {})
+
+    # Deferred commit: messages are committed at start of next process() call.
+    # Simulate the commit by calling with a new (dummy) turn_id.
+    handler._try_commit_pending("dummy-turn", 1, cfg.chat)
 
     dict_entries = [e for e in cfg.chat.buffer if isinstance(e, dict)]
     assert len(dict_entries) >= 2

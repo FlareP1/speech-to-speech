@@ -187,6 +187,15 @@ class ChatCompletionsApiModelHandler(BaseOpenAICompatibleHandler):
         self.suppress_tool_call_flush = suppress_tool_call_flush
         self.mcp_client: MCPClient | None = None
         self.tools: list[dict] = []
+      # Deferred commit: hold messages until next turn, then insert at correct position
+        self._pending_messages: list | None = None
+        self._pending_turn_id: str | None = None
+        self._pending_turn_revision: int | None = None
+        self._pending_insert_pos: int | None = None
+        self._pending_prev_baseline: int | None = None
+        # Baseline tracking for reopen detection
+        self._turn_baseline: int = 0
+        self._prev_baseline: int = 0
 
         if mcp_enabled and mcp_server_url:
             server_list = [s.strip() for s in (mcp_servers or "").split(",") if s.strip()]
@@ -459,6 +468,44 @@ class ChatCompletionsApiModelHandler(BaseOpenAICompatibleHandler):
 
     # ── process override: MCP tool loop ──────────────────────────────────────
 
+    def _try_commit_pending(self, new_turn_id: str, new_turn_revision: int, original_chat: Chat) -> None:
+        """Commit pending messages from previous process() if turn advanced (not reopened).
+
+        Uses baseline tracking to insert at correct position (before user message)
+        and to truncate previous revision's messages on reopen.
+        """
+        if self._pending_messages is None:
+            return
+
+        # If same turn_id but higher revision, the turn was reopened - discard pending and old user message
+        if self._pending_turn_id == new_turn_id and new_turn_revision > self._pending_turn_revision:
+            logger.debug("Turn %s reopened (rev %d -> %d), discarding rev %d pending messages and old user message",
+                         new_turn_id, self._pending_turn_revision, new_turn_revision,
+                         self._pending_turn_revision)
+            # Save new messages added since previous baseline (the new user message for this revision)
+            new_msgs = original_chat.buffer[self._prev_baseline:]
+            # Reconstruct buffer: history (before old turn) + new messages only
+            prev_bl = self._pending_prev_baseline if self._pending_prev_baseline is not None else 0
+            original_chat.buffer[:] = original_chat.buffer[:prev_bl] + new_msgs
+            self._prev_baseline = prev_bl
+            self._turn_baseline = len(original_chat.buffer)
+            self._clear_pending()
+            return
+
+        # Insert pending at saved position (before user message from this turn)
+        insert_pos = self._pending_insert_pos if self._pending_insert_pos is not None else len(original_chat.buffer)
+        original_chat.buffer[insert_pos:insert_pos] = self._pending_messages
+        original_chat.strip_images()
+        original_chat.trim_if_needed(self.compactor)
+        self._clear_pending()
+
+    def _clear_pending(self) -> None:
+        self._pending_messages = None
+        self._pending_turn_id = None
+        self._pending_turn_revision = None
+        self._pending_insert_pos = None
+        self._pending_prev_baseline = None
+
     def process(self, request: LLMIn) -> Iterator[LLMOut]:
         runtime_config = request.runtime_config
         response = request.response
@@ -472,6 +519,10 @@ class ChatCompletionsApiModelHandler(BaseOpenAICompatibleHandler):
             return
 
         original_chat = runtime_config.chat
+        # Save previous baseline before updating, for reopen truncation
+        self._prev_baseline = self._turn_baseline
+        self._turn_baseline = len(original_chat.buffer)
+        self._try_commit_pending(turn_id, turn_revision, original_chat)
         if is_out_of_band(response):
             try:
                 active_chat = build_active_chat(original_chat, response)
@@ -522,6 +573,14 @@ class ChatCompletionsApiModelHandler(BaseOpenAICompatibleHandler):
             pct = (est_tokens / max_ctx * 100) if max_ctx else 0
             logger.info("=== LLM iteration %d: %d messages, buffer=%d items, est_tokens=%d/%d (%.1f%%) ===",
                          iteration, len(messages), len(active_chat.buffer), est_tokens, max_ctx, pct)
+            # DEBUG: log each message sent to LLM
+            for i, m in enumerate(messages):
+                role = m.get("role", "?")
+                content = m.get("content", "")
+                if isinstance(content, str) and len(content) > 100:
+                    content = content[:100] + "..."
+                tc_info = f" tool_calls={len(m.get('tool_calls', []))}" if m.get("tool_calls") else ""
+                logger.info("  msg[%d] %s: %s%s", i, role, content, tc_info)
 
             if self._generation_is_stale(gen) or not self._turn_is_latest(turn_id, turn_revision):
                 logger.info("LLM generation cancelled (interruption)")
@@ -596,20 +655,32 @@ class ChatCompletionsApiModelHandler(BaseOpenAICompatibleHandler):
                 active_chat.buffer.append(tool_msg)
 
         if not cancelled and not is_out_of_band(response):
-            for item in state.pending:
-                original_chat.add_item(item)
-            for entry in active_chat.buffer:
-                if isinstance(entry, dict) and entry not in original_chat.buffer:
-                    original_chat.buffer.append(entry)
-            original_chat.strip_images()
-            original_chat.trim_if_needed(self.compactor)
+            # Add assistant's final text response to active_chat.buffer if not already there
+            if state.clean_text.strip():
+                from speech_to_speech.LLM.chat import make_assistant_message
+                active_chat.add_item(make_assistant_message(state.clean_text))
+
+            # Collect all buffer entries that aren't in original_chat
+            pending = [entry for entry in active_chat.buffer if entry not in original_chat.buffer]
+            self._pending_messages = pending
+            self._pending_insert_pos = len(original_chat.buffer)
+            self._pending_turn_id = turn_id
+            self._pending_turn_revision = turn_revision
+            self._pending_prev_baseline = self._prev_baseline
+            logger.debug("Deferred: saved %d pending messages at insert_pos=%d for turn=%s rev=%s",
+                         len(pending), self._pending_insert_pos, turn_id, turn_revision)
 
         if not cancelled and iteration >= 4 and not state.clean_text.strip():
             fallback = "I wasn't able to find the information you were looking for. Could you try rephrasing your question?"
             yield self._chunk(turn, text=fallback)
             if not is_out_of_band(response):
                 from speech_to_speech.LLM.chat import make_assistant_message
-                original_chat.add_item(make_assistant_message(fallback))
+                # Add to pending for deferred commit
+                if self._pending_messages is not None:
+                    self._pending_messages.append(make_assistant_message(fallback))
+                else:
+                    # If pending was already committed (shouldn't happen normally), commit directly
+                    original_chat.add_item(make_assistant_message(fallback))
 
         if total_input_tokens or total_output_tokens:
             yield TokenUsage(
@@ -628,6 +699,9 @@ class ChatCompletionsApiModelHandler(BaseOpenAICompatibleHandler):
 
     def on_session_end(self) -> None:
         logger.debug("%s: session state reset", self.__class__.__name__)
+        # Discard any leftover pending messages on session end
+        self._pending_messages = None
+        self._pending_turn_id = None
         if self.mcp_client:
             self.mcp_client.disconnect()
             self.mcp_client = None

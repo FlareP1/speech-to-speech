@@ -108,6 +108,8 @@ def _make_handler(*, disable_thinking=False, stream=True, cancel_scope=None):
     handler.tools_choice = None
     handler.enable_lang_prompt = False
     handler.compactor = None
+    handler.voice_prompt_lead = None
+    handler.voice_prompt_tail = None
     return handler
 
 

@@ -290,6 +290,7 @@ class VADHandler(BaseHandler[VADIn, VADOut]):
             return None
         self._current_turn_id = turn_id
         self._current_turn_revision = candidate_revision
+        self._speculative_audio_prefix = None
         logger.info("VAD: reopened speculative turn %s revision %d", turn_id, candidate_revision)
         return turn_id, candidate_revision, True
 
@@ -312,6 +313,7 @@ class VADHandler(BaseHandler[VADIn, VADOut]):
 
         self._current_turn_id = turn_id
         self._current_turn_revision = candidate_revision
+        self._speculative_audio_prefix = None
         logger.info("VAD: reopened speculative turn %s revision %d", turn_id, candidate_revision)
         return turn_id, candidate_revision, True
 
